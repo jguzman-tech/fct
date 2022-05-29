@@ -1,0 +1,141 @@
+#!/bin/bash
+
+#######################################
+# Randomly prompts the user to answer
+# a question, derived from the parsed
+# deck.
+# Globals:
+#   deck
+#   keyphrases
+#   correct
+#   total
+# Arguments:
+#   q_type ("define")
+#######################################
+function fct_ask_rand {
+    q_type="$1"
+    text=""
+    correct_i="$(printf "\x$(printf %x $((65 + ${RANDOM} % 4)))")"
+
+    for i in {A..D}; do
+        r="$((${RANDOM} % ${#keyphrases[@]}))"
+        if [[ "$i" == "$correct_i" ]]; then
+            keyphrase="${keyphrases[$r]}"
+            text="Which of the following best describes $keyphrase?\n\n${text}"
+        fi
+        definition="$(echo "${deck[${keyphrases[$r]}]}" | cut -d':' -f 2)"
+        text="${text}$(echo -n "$i. $definition\n\n")"
+    done
+    text="${text}\nChoose a letter then hit ('Q' to quit) <ENTER>:"
+    
+    [[ "$total" -gt 0 ]] && percentage=$((100*correct/total)) || percentage=0
+    choice="$(whiptail --title "Score: $percentage% ($correct out of $total)" --scrolltext --inputbox "$text" 24 80 3>&1 1>&2 2>&3)"
+
+    if [[ "$choice" == "$correct_i" ]]; then
+        correct=$((correct+1))
+    elif [[ "$choice" == 'Q' ]]; then
+        return 1
+    fi
+    total=$((total+1))
+    return 0
+}
+
+function fct_parse_file {
+    declare -A deck
+
+    fpath="$1"
+
+    total_lines="$(wc -l "$fpath" | cut -d ' ' -f 1)"
+
+    buffer=""
+    count=0
+    while IFS= read -r line; do
+        count=$((count + 1))
+        if [[ $count -ne $total_lines ]]; then
+            echo "$((100 * count / total_lines))" 1>&2
+        fi
+        if [[ "${#line}" == 0 ]]; then
+            if [[ "${#buffer}" -eq 0 ]]; then
+                continue
+            fi
+            
+            # replace : with the octal code, trim ws
+            buffer="${buffer/\\:/\072}"
+            buffer="$(echo "$buffer" | tr -s '[:space:]')"
+            
+            IFS=':' read -r keyphrase definition < <(echo "${buffer}")
+            if [[ "$keyphrase" =~ ^.*\(.*\).*$ ]]; then
+                alt="${keyphrase/*\(/}"
+                alt="${alt/\)*/}"
+                keyphrase="${keyphrase/\(*/}"
+            fi
+            
+            # trim leading and trailing whitespace from each component
+            keyphrase="${keyphrase#[[:space:]]}"
+            keyphrase="${keyphrase%[[:space:]]}"
+            alt="${alt#[[:space:]]}"
+            alt="${alt%[[:space:]]}"
+            definition="${definition#[[:space:]]}"
+            definition="${definition%[[:space:]]}"
+            deck["$keyphrase"]="${alt}:${definition}"
+            
+            buffer=""
+        else
+            buffer="${buffer} ${line}"
+        fi
+    done < <(cat "$fpath"; echo -ne "\n\n")
+    declare -p deck
+}
+
+function usage {
+    echo "$0 FILE"
+}
+
+
+if [[ "$#" -ne 1 || ! -f "$1" ]]; then
+    echo "Error: must provide a valid file"
+    usage
+    exit 1
+fi
+
+if [[ "$(tput cols)" -lt 80 || "$(tput lines)" -lt 24 ]]; then
+    echo "Error: Terminal window is too small."
+    echo -e "\tThis program preemtively exists if your terminal is not at least 80x24."
+    echo -e "\tPlease increase the size of your terminal window and relaunch this program."
+    exit 1
+fi
+
+# src_pipe="$(mktemp -u '/tmp/fct-pipe-XXXX')"
+src_pipe="./src_pipe"
+rm "$src_pipe" 2> /dev/null
+mkfifo "$src_pipe" 2> /dev/null
+
+# prog_pipe="$(mktemp -u '/tmp/fct-pipe-XXXX')"
+prog_pipe="./prog_pipe"
+rm "$prog_pipe" 2> /dev/null
+mkfifo "$prog_pipe" 2> /dev/null
+
+fct_parse_file "$1" 1<>"$src_pipe" 2<>"$prog_pipe" &
+
+whiptail --gauge "parsing $1" 6 60 100 < "$prog_pipe" &
+
+src="$(read -r line < "$src_pipe"; echo "$line")"
+eval "$src"
+
+echo "100" 1<> prog_pipe
+
+declare -a keyphrases
+for i in "${!deck[@]}"; do
+    keyphrases+=( "$i" )
+done
+
+correct=0
+export correct
+total=0
+export total
+
+while fct_ask_rand "$define"; do :; done
+
+[[ "$total" -gt 0 ]] && percentage=$((100*correct/total)) || percentage=0
+text="Final Score $percentage % ($correct out of $total)"
+whiptail --msgbox "$text" 24 80
