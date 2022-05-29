@@ -33,7 +33,7 @@ I generated the coreutils file by running this multi-step pipeline command on my
 
 What this fct interface looks like:
 
-![flashcard-derived question prompt](./screenshots/usage-example.png)
+![flashcard-derived question prompt](./screenshots/question-prompt.png)
 
 You enter a letter and the program will keep track of your score. Once you enter Q at the prompt, it'll show you your final score and you can hit <ENTER> to exit.
 
