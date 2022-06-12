@@ -7,24 +7,63 @@
 # Globals:
 #   deck
 #   keyphrases
+#   num_alts
 #   correct
 #   total
 # Arguments:
-#   q_type ("define")
+#   q_type ('key-to-def' or 'alt-to-key')
 #######################################
 function fct_ask_rand {
     q_type="$1"
     text=""
     correct_i="$(printf "\x$(printf %x $((65 + ${RANDOM} % 4)))")"
 
+    if [[ "${#deck[@]}" -lt 4 ]]; then
+        echo "there must be at least 4 terms" \
+             "in order to generate mutliple-choice" \
+             "questions, found '${#deck[@]}'"
+        exit 1
+    fi
+    
+    if [[ "$num_alts" -lt 4 && "$q_type" == 'alt-to-key' ]]; then
+        echo "there must be at least 4 terms with alternative" \
+             "phrases in order to generate a '${q_type}' question," \
+             "found $num_alts"
+        exit 1
+    fi
+    
+    declare -a prev_rs
+
     for i in {A..D}; do
-        r="$((${RANDOM} % ${#keyphrases[@]}))"
-        if [[ "$i" == "$correct_i" ]]; then
-            keyphrase="${keyphrases[$r]}"
-            text="Which of the following best describes $keyphrase?\n\n${text}"
+        if [[ "$q_type" == 'key-to-def' ]]; then
+            r="$((${RANDOM} % ${#keyphrases[@]}))"
+            while [[ "${prev_rs[@]}" =~ "$r" ]]; do
+                r="$((${RANDOM} % ${#keyphrases[@]}))"
+            done
+            prev_rs+=( "$r" )
+            if [[ "$i" == "$correct_i" ]]; then
+                keyphrase="${keyphrases[$r]}"
+                text="Which of the following best describes $keyphrase?\n\n${text}"
+            fi
+            definition="$(echo "${deck[${keyphrases[$r]}]}" | cut -d':' -f 2)"
+            text="${text}$(echo -n "$i. $definition\n\n")"
+        elif [[ "$q_type" == 'alt-to-key' ]]; then
+            r="$((${RANDOM} % ${#keyphrases[@]}))"
+            alt="$(echo "${deck[${keyphrases[$r]}]}" | cut -d':' -f 1)"
+            while [[ -z "$alt" || "${prev_rs[@]}" =~ "$r" ]]; do
+                r="$((${RANDOM} % ${#keyphrases[@]}))"
+                alt="$(echo "${deck[${keyphrases[$r]}]}" | cut -d':' -f 1)"
+            done
+            prev_rs+=( "$r" )
+            if [[ "$i" == "$correct_i" ]]; then
+                keyphrase="${keyphrases[$r]}"
+                text="Which of the following is the same as $keyphrase?\n\n${text}"
+            fi
+            text="${text}$(echo -n "$i. $alt\n\n")"
+        else
+            echo "Error: q_type '$q_type' not supported"
+            exit 1
         fi
-        definition="$(echo "${deck[${keyphrases[$r]}]}" | cut -d':' -f 2)"
-        text="${text}$(echo -n "$i. $definition\n\n")"
     done
     text="${text}\nChoose a letter then hit ('Q' to quit) <ENTER>:"
     
@@ -40,12 +79,21 @@ function fct_ask_rand {
     return 0
 }
 
+#######################################
+# Randomly prompts the user to answer
+# a question, derived from the parsed
+# deck.
+# Globals:
+#   deck
+# Arguments:
+#   file
+#######################################
 function fct_parse_file {
     declare -A deck
 
-    fpath="$1"
+    file="$1"
 
-    total_lines="$(wc -l "$fpath" | cut -d ' ' -f 1)"
+    total_lines="$(wc -l "$file" | cut -d ' ' -f 1)"
 
     buffer=""
     count=0
@@ -78,12 +126,15 @@ function fct_parse_file {
             definition="${definition#[[:space:]]}"
             definition="${definition%[[:space:]]}"
             deck["$keyphrase"]="${alt}:${definition}"
-            
+
+            keyphrase=""
+            alt=""
+            definition=""
             buffer=""
         else
             buffer="${buffer} ${line}"
         fi
-    done < <(cat "$fpath"; echo -ne "\n\n")
+    done < <(cat "$file"; echo -ne "\n\n")
     declare -p deck
 }
 
@@ -105,14 +156,10 @@ if [[ "$(tput cols)" -lt 80 || "$(tput lines)" -lt 24 ]]; then
     exit 1
 fi
 
-# src_pipe="$(mktemp -u '/tmp/fct-pipe-XXXX')"
-src_pipe="./src_pipe"
-rm "$src_pipe" 2> /dev/null
+src_pipe="$(mktemp -u '/tmp/fct-pipe-XXXX')"
 mkfifo "$src_pipe" 2> /dev/null
 
-# prog_pipe="$(mktemp -u '/tmp/fct-pipe-XXXX')"
-prog_pipe="./prog_pipe"
-rm "$prog_pipe" 2> /dev/null
+prog_pipe="$(mktemp -u '/tmp/fct-pipe-XXXX')"
 mkfifo "$prog_pipe" 2> /dev/null
 
 fct_parse_file "$1" 1<>"$src_pipe" 2<>"$prog_pipe" &
@@ -120,13 +167,18 @@ fct_parse_file "$1" 1<>"$src_pipe" 2<>"$prog_pipe" &
 whiptail --gauge "parsing $1" 6 60 100 < "$prog_pipe" &
 
 src="$(read -r line < "$src_pipe"; echo "$line")"
+rm "$src_pipe"
 eval "$src"
 
 echo "100" 1<> prog_pipe
+rm "$prog_pipe"
+
+num_alts=0
 
 declare -a keyphrases
 for i in "${!deck[@]}"; do
     keyphrases+=( "$i" )
+    [[ "${deck[$i]:0:1}" != ':' ]] && num_alts=$((num_alts+1))
 done
 
 correct=0
@@ -134,7 +186,16 @@ export correct
 total=0
 export total
 
-while fct_ask_rand "$define"; do :; done
+count=0
+while :; do
+    if (( count % 2 )); then
+        q_type='key-to-def'
+    else
+        q_type='alt-to-key'
+    fi
+    fct_ask_rand "$q_type" || break
+    count=$((count+1))
+done
 
 [[ "$total" -gt 0 ]] && percentage=$((100*correct/total)) || percentage=0
 text="Final Score $percentage % ($correct out of $total)"
